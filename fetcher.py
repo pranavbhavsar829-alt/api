@@ -18,6 +18,9 @@ else:
 DB_PATH = os.path.join(BASE_DIR, 'my_history_storage.db')
 EXTERNAL_API_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
 
+# HOW MANY RECORDS TO KEEP
+MAX_RECORDS = 2000
+
 # --- DATABASE INIT ---
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -44,10 +47,13 @@ async def fetch_external_page(session, page_no):
     return []
 
 async def save_to_db(items):
-    """Saves a list of items to OUR database."""
+    """Saves items and deletes old records if count > 2000."""
     if not items: return
+    
     conn = sqlite3.connect(DB_PATH)
     new_count = 0
+    
+    # 1. Insert New Records
     for item in items:
         try:
             iss = str(item.get('issueNumber'))
@@ -61,8 +67,28 @@ async def save_to_db(items):
             )
             if conn.total_changes > 0: new_count += 1
         except: pass
+    
+    # 2. Cleanup Old Records (Only if we added something new)
+    if new_count > 0:
+        try:
+            # This query keeps the top MAX_RECORDS (ordered by issue DESC) and deletes the rest
+            conn.execute(f'''
+                DELETE FROM history 
+                WHERE issue NOT IN (
+                    SELECT issue FROM history 
+                    ORDER BY issue DESC 
+                    LIMIT {MAX_RECORDS}
+                )
+            ''')
+            deleted = conn.total_changes
+            if deleted > 0:
+                print(f"[CLEANUP] Pruned {deleted} old records to maintain limit of {MAX_RECORDS}.")
+        except Exception as e:
+            print(f"[CLEANUP ERROR] {e}")
+
     conn.commit()
     conn.close()
+    
     if new_count > 0:
         print(f"[RECORDER] Saved {new_count} new records.")
 
@@ -74,6 +100,8 @@ async def start_recording_engine():
     async with aiohttp.ClientSession() as session:
         
         # PHASE 1: INITIAL BACKFILL (Grab last 1000 results on startup)
+        # Note: We fetch 50 pages * 20 items = 1000 items. 
+        # Since limit is 2000, this is safe.
         print(">>> STARTING BACKFILL (Mining old data)...")
         for p in range(1, 51): # Pages 1 to 50
             items = await fetch_external_page(session, p)
